@@ -4,11 +4,11 @@ Authors: Jason Wei, Nguyen Karina, Hyung Won Chung, Yunxin Joy Jiao, Spencer Pap
 https://cdn.openai.com/papers/simpleqa.pdf
 """ 
 
-import random 
+import os
 import re
 import pandas
 from . import common
-from .types import Eval, EvalResult, SamplerBase, SingleEvalResult
+from .custom_types import Eval, EvalResult, SamplerBase, SingleEvalResult
 
 GRADER_TEMPLATE = """
 Your job is to look at a question, a gold target, and a predicted answer, and then assign a grade of either ["CORRECT", "INCORRECT", "NOT_ATTEMPTED"].
@@ -97,17 +97,17 @@ CHOICE_STRINGS = ["CORRECT", "INCORRECT", "NOT_ATTEMPTED"]
 CHOICE_LETTER_TO_STRING = dict(zip(CHOICE_LETTERS, CHOICE_STRINGS))
 
 class SimpleQAEval(Eval):
-    def __init__(self, grader_model: SamplerBase, num_examples: int | None = None, n_repeats: int = 1):
+    def __init__(self, grader_model: SamplerBase, num_examples: int | None = None, n_repeats: int = 1, n_threads: int | None = None):
         df = pandas.read_csv(
             "https://openaipublic.blob.core.windows.net/simple-evals/simple_qa_test_set.csv"
         )
         examples = [row.to_dict() for _, row in df.iterrows()]
         if num_examples:
             assert n_repeats == 1, "n_repeats only supported when max_examples = None"
-            rng = random.Random(0)
-            examples = rng.sample(examples, num_examples)
+            examples = examples[:num_examples]
         self.examples = examples * n_repeats
         self.grader_model = grader_model
+        self.n_threads = n_threads
 
     def grade_sample(self, question: str, target: str, predicted_answer: str) -> str:
         grader_prompt = GRADER_TEMPLATE.format(
@@ -158,7 +158,8 @@ class SimpleQAEval(Eval):
                 })
 
             # Run evaluation and collect results
-            results = common.map_with_progress(fn, self.examples)
+            num_threads = self.n_threads if self.n_threads else (os.cpu_count() or 10)
+            results = common.map_with_progress(fn, self.examples, num_threads=num_threads)
 
             # Aggregate metrics
             aggregate_metrics = {

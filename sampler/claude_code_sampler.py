@@ -551,7 +551,7 @@ Write your answer to `{self.solution_path}`. Your answer should be:
         task_id = self._task_counter
 
         trial = 0
-        max_retries = 3
+        max_retries = 1
 
         while trial < max_retries:
             try:

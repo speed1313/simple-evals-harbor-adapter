@@ -1,0 +1,35 @@
+[project]
+name = "simple-evals"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.77.0",
+    "blobfile>=2.0.0",
+    "human-eval",
+    "jinja2>=3.1.6",
+    "openai>=1.0.0",
+    "pandas>=3.0.0",
+    "requests>=2.32.5",
+    "scipy>=1.0.0",
+    "tabulate>=0.9.0",
+    "tqdm>=4.67.2",
+]
+
+[project.scripts]
+simple-evals = "simple_evals.simple_evals:main"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]
+
+[tool.setuptools.package-dir]
+simple_evals = "."

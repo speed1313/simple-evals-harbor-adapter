@@ -21,6 +21,7 @@ from .sampler.chat_completion_sampler import (
     ChatCompletionSampler,
 )
 from .sampler.claude_sampler import ClaudeCompletionSampler, CLAUDE_SYSTEM_MESSAGE_LMSYS
+from .sampler.claude_code_sampler import ClaudeCodeSampler
 from .sampler.o_chat_completion_sampler import OChatCompletionSampler
 from .sampler.responses_sampler import ResponsesSampler
 from .simpleqa_eval import SimpleQAEval
@@ -52,15 +53,54 @@ def main():
     parser.add_argument(
         "--n-threads",
         type=int,
-        default=120,
-        help="Number of threads to run. Only supported for HealthBench and HealthBenchMeta.",
+        default=None,
+        help="Number of threads to run. Supported for SimpleQA, HealthBench, and HealthBenchMeta. Default: CPU count for SimpleQA, 120 for HealthBench.",
     )
     parser.add_argument("--debug", action="store_true", help="Run in debug mode")
     parser.add_argument(
         "--examples", type=int, help="Number of examples to use (overrides default)"
     )
+    parser.add_argument(
+        "--claude-code-model",
+        type=str,
+        default="claude-sonnet-4-20250514",
+        help="Model to use with claude-code sampler (default: claude-sonnet-4-20250514)",
+    )
 
     args = parser.parse_args()
+
+    # List of available model names (defined separately to avoid initializing samplers for --list-models)
+    MODEL_NAMES = [
+        # Reasoning Models
+        "o3", "o3-temp-1", "o3_high", "o3_low",
+        "o4-mini", "o4-mini_high", "o4-mini_low",
+        "o1-pro", "o1", "o1_high", "o1_low", "o1-preview", "o1-mini",
+        # GPT-4.1 models
+        "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
+        # GPT-4o models
+        "gpt-4o", "gpt-4o-2024-11-20", "gpt-4o-2024-08-06", "gpt-4o-2024-08-06-temp-1",
+        "gpt-4o-2024-05-13", "gpt-4o-mini",
+        # GPT-4.5 model
+        "gpt-4.5-preview",
+        # GPT-4-turbo model
+        "gpt-4-turbo-2024-04-09",
+        # GPT-4 model
+        "gpt-4-0613",
+        # GPT-3.5 Turbo model
+        "gpt-3.5-turbo-0125", "gpt-3.5-turbo-0125-temp-1",
+        # Chatgpt models
+        "chatgpt-4o-latest", "gpt-4-turbo-2024-04-09_chatgpt",
+        # Claude models
+        "claude-3-opus-20240229_empty", "claude-3-7-sonnet-20250219", "claude-3-haiku-20240307",
+        # Claude Code (agent-based evaluation)
+        "claude-code", "claude-code-local",
+    ]
+
+    if args.list_models:
+        print("Available models:")
+        for model_name in MODEL_NAMES:
+            print(f" - {model_name}")
+        return
 
     models = {
         # Reasoning Models
@@ -233,13 +273,16 @@ def main():
         "claude-3-haiku-20240307": ClaudeCompletionSampler(
             model="claude-3-haiku-20240307",
         ),
+        # Claude Code (agent-based evaluation using Docker)
+        "claude-code": ClaudeCodeSampler(
+            model=args.claude_code_model,
+            use_docker=True,
+        ),
+        "claude-code-local": ClaudeCodeSampler(
+            model=args.claude_code_model,
+            use_docker=False,
+        ),
     }
-
-    if args.list_models:
-        print("Available models:")
-        for model_name in models.keys():
-            print(f" - {model_name}")
-        return
 
     if args.model:
         models_chosen = args.model.split(",")
@@ -252,7 +295,7 @@ def main():
     print(f"Running with args {args}")
 
     grading_sampler = ChatCompletionSampler(
-        model="gpt-4.1-2025-04-14",
+        model="gpt-4o-mini",
         system_message=OPENAI_SYSTEM_MESSAGE_API,
         max_tokens=2048,
     )
@@ -293,6 +336,7 @@ def main():
                 return SimpleQAEval(
                     grader_model=grading_sampler,
                     num_examples=10 if debug_mode else num_examples,
+                    n_threads=args.n_threads,
                 )
             case "browsecomp":
                 return BrowseCompEval(
@@ -304,7 +348,7 @@ def main():
                     grader_model=grading_sampler,
                     num_examples=10 if debug_mode else num_examples,
                     n_repeats=args.n_repeats or 1,
-                    n_threads=args.n_threads or 1,
+                    n_threads=args.n_threads or 120,
                     subset_name=None,
                 )
             case "healthbench_hard":
@@ -312,7 +356,7 @@ def main():
                     grader_model=grading_sampler,
                     num_examples=10 if debug_mode else num_examples,
                     n_repeats=args.n_repeats or 1,
-                    n_threads=args.n_threads or 1,
+                    n_threads=args.n_threads or 120,
                     subset_name="hard",
                 )
             case "healthbench_consensus":
@@ -320,7 +364,7 @@ def main():
                     grader_model=grading_sampler,
                     num_examples=10 if debug_mode else num_examples,
                     n_repeats=args.n_repeats or 1,
-                    n_threads=args.n_threads or 1,
+                    n_threads=args.n_threads or 120,
                     subset_name="consensus",
                 )
             case "healthbench_meta":
@@ -328,7 +372,7 @@ def main():
                     grader_model=grading_sampler,
                     num_examples=10 if debug_mode else num_examples,
                     n_repeats=args.n_repeats or 1,
-                    n_threads=args.n_threads or 1,
+                    n_threads=args.n_threads or 120,
                 )
             case _:
                 raise Exception(f"Unrecognized eval type: {eval_name}")
