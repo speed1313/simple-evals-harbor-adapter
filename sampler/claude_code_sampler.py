@@ -123,13 +123,14 @@ class ClaudeCodeSampler(SamplerBase):
         self,
         model: str = "claude-sonnet-4-20250514",
         max_thinking_tokens: int | None = None,
-        timeout: int = 300,  # 5 minutes default timeout
+        timeout: int = 3000,  # 50 minutes default timeout
         solution_path: str = "/workspace/answer.txt",
         allowed_tools: list[str] | None = None,
         docker_image: str | None = None,
         use_docker: bool = True,
         build_image: bool = True,
         trajectory_dir: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ):
         """
         Initialize the Claude Code sampler.
@@ -144,6 +145,7 @@ class ClaudeCodeSampler(SamplerBase):
             use_docker: Whether to use Docker (set False for local execution)
             build_image: Whether to build the Docker image if it doesn't exist
             trajectory_dir: Directory to save agent trajectories (default: /tmp/claude-code-trajectories)
+            extra_env: Additional environment variables to pass to Docker container
         """
         self.model = model
         self.max_thinking_tokens = max_thinking_tokens
@@ -154,6 +156,7 @@ class ClaudeCodeSampler(SamplerBase):
         self.use_docker = use_docker
         self.image_format = "base64"
         self.trajectory_dir = trajectory_dir or "/tmp/claude-code-trajectories"
+        self.extra_env = extra_env or {}
         self._task_counter = 0
 
         # Create trajectory directory
@@ -331,6 +334,10 @@ Write your answer to `{self.solution_path}`. Your answer should be:
 
         # Disable telemetry
         env_args.extend(["-e", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"])
+
+        # Pass extra environment variables from config
+        for key, value in self.extra_env.items():
+            env_args.extend(["-e", f"{key}={value}"])
 
         # Build the claude command (following Harbor's approach exactly)
         # - 2>&1: combine stderr with stdout

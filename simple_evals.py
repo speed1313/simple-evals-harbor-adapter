@@ -1,12 +1,13 @@
 import argparse
 import json
-import subprocess
+import os
 from datetime import datetime
 
 import pandas as pd
 
 from . import common
 from .browsecomp_eval import BrowseCompEval
+from .config import EvalConfig, load_config
 from .drop_eval import DropEval
 from .gpqa_eval import GPQAEval
 from .healthbench_eval import HealthBenchEval
@@ -15,6 +16,7 @@ from .math_eval import MathEval
 from .mgsm_eval import MGSMEval
 from .mmlu_eval import MMLUEval
 from .humaneval_eval import HumanEval
+from .output import JobOutputManager
 from .sampler.chat_completion_sampler import (
     OPENAI_SYSTEM_MESSAGE_API,
     OPENAI_SYSTEM_MESSAGE_CHATGPT,
@@ -24,7 +26,240 @@ from .sampler.claude_sampler import ClaudeCompletionSampler, CLAUDE_SYSTEM_MESSA
 from .sampler.claude_code_sampler import ClaudeCodeSampler
 from .sampler.o_chat_completion_sampler import OChatCompletionSampler
 from .sampler.responses_sampler import ResponsesSampler
+from .custom_types import Eval as EvalBase
 from .simpleqa_eval import SimpleQAEval
+
+
+def _build_eval(
+    eval_name: str,
+    debug_mode: bool,
+    num_examples_override: int | None,
+    n_repeats: int | None,
+    n_threads: int | None,
+    grading_sampler: ChatCompletionSampler,
+    equality_checker: ChatCompletionSampler,
+):
+    """Build an eval object by name. Standalone so both CLI and config paths can use it."""
+    num_examples = (
+        num_examples_override
+        if num_examples_override is not None
+        else (5 if debug_mode else None)
+    )
+    match eval_name:
+        case "mmlu":
+            return MMLUEval(num_examples=1 if debug_mode else num_examples)
+        case "math":
+            return MathEval(
+                equality_checker=equality_checker,
+                num_examples=num_examples,
+                n_repeats=1 if debug_mode else n_repeats or 10,
+            )
+        case "gpqa":
+            return GPQAEval(
+                n_repeats=1 if debug_mode else n_repeats or 10,
+                num_examples=num_examples,
+            )
+        case "mgsm":
+            return MGSMEval(
+                num_examples_per_lang=10 if debug_mode else num_examples or 250
+            )
+        case "drop":
+            return DropEval(
+                num_examples=10 if debug_mode else num_examples,
+                train_samples_per_prompt=3,
+            )
+        case "humaneval":
+            return HumanEval(num_examples=10 if debug_mode else num_examples)
+        case "simpleqa":
+            return SimpleQAEval(
+                grader_model=grading_sampler,
+                num_examples=10 if debug_mode else num_examples,
+                n_threads=n_threads,
+            )
+        case "browsecomp":
+            return BrowseCompEval(
+                grader_model=grading_sampler,
+                num_examples=10 if debug_mode else num_examples,
+            )
+        case "healthbench":
+            return HealthBenchEval(
+                grader_model=grading_sampler,
+                num_examples=10 if debug_mode else num_examples,
+                n_repeats=n_repeats or 1,
+                n_threads=n_threads or 120,
+                subset_name=None,
+            )
+        case "healthbench_hard":
+            return HealthBenchEval(
+                grader_model=grading_sampler,
+                num_examples=10 if debug_mode else num_examples,
+                n_repeats=n_repeats or 1,
+                n_threads=n_threads or 120,
+                subset_name="hard",
+            )
+        case "healthbench_consensus":
+            return HealthBenchEval(
+                grader_model=grading_sampler,
+                num_examples=10 if debug_mode else num_examples,
+                n_repeats=n_repeats or 1,
+                n_threads=n_threads or 120,
+                subset_name="consensus",
+            )
+        case "healthbench_meta":
+            return HealthBenchMetaEval(
+                grader_model=grading_sampler,
+                num_examples=10 if debug_mode else num_examples,
+                n_repeats=n_repeats or 1,
+                n_threads=n_threads or 120,
+            )
+        case _:
+            raise Exception(f"Unrecognized eval type: {eval_name}")
+
+
+def run_from_config(config: EvalConfig, args: argparse.Namespace):
+    """Run evaluations from a YAML config file (Harbor-style)."""
+
+    # Warn if --model or --eval are specified alongside --config
+    if args.model:
+        print("Warning: --model is ignored when using -c/--config (agents are defined in config)")
+    if args.eval:
+        print("Warning: --eval is ignored when using -c/--config (datasets are defined in config)")
+
+    # Grading/checker models needed by evals
+    grading_sampler = ChatCompletionSampler(
+        model="gpt-4o-mini",
+        system_message=OPENAI_SYSTEM_MESSAGE_API,
+        max_tokens=2048,
+    )
+    equality_checker = ChatCompletionSampler(model="gpt-4-turbo-preview")
+
+    # Resolve environment variables from config
+    extra_env = config.environment.get_resolved_env()
+
+    # Build samplers from config agents
+    samplers: dict[str, ClaudeCodeSampler | ClaudeCompletionSampler] = {}
+    for agent in config.agents:
+        timeout = int(agent.override_timeout_sec * config.timeout_multiplier)
+
+        # Filter out kwargs that are informational only (e.g. version)
+        sampler_kwargs = {k: v for k, v in agent.kwargs.items() if k != "version"}
+        if "version" in agent.kwargs:
+            print(f"Info: agent '{agent.name}' specifies version={agent.kwargs['version']} (noted, not enforced)")
+
+        if agent.name in ("claude-code", "claude-code-local"):
+            use_docker = config.environment.use_docker
+            sampler = ClaudeCodeSampler(
+                model=agent.model_name,
+                timeout=timeout,
+                use_docker=use_docker,
+                build_image=config.environment.force_build,
+                extra_env=extra_env,
+                **sampler_kwargs,
+            )
+            samplers[agent.name] = sampler
+        else:
+            sampler = ClaudeCompletionSampler(
+                model=agent.model_name,
+                system_message=CLAUDE_SYSTEM_MESSAGE_LMSYS,
+                **sampler_kwargs,
+            )
+            samplers[agent.name] = sampler
+
+    # Build evals from config datasets
+    debug_mode = args.debug
+    num_examples_override = args.examples
+    n_repeats = args.n_repeats
+    n_threads = args.n_threads or config.orchestrator.n_concurrent_trials
+
+    evals: dict[str, EvalBase] = {}
+    for dataset in config.datasets:
+        eval_name = dataset.eval_name
+        evals[eval_name] = _build_eval(
+            eval_name=eval_name,
+            debug_mode=debug_mode,
+            num_examples_override=num_examples_override,
+            n_repeats=n_repeats,
+            n_threads=n_threads,
+            grading_sampler=grading_sampler,
+            equality_checker=equality_checker,
+        )
+
+    # Setup output manager
+    output_mgr = JobOutputManager(jobs_dir=config.jobs_dir, job_name=config.job_name)
+
+    print(f"Config: job_name={config.job_name}, jobs_dir={config.jobs_dir}")
+    print(f"Agents: {list(samplers.keys())}")
+    print(f"Datasets: {list(evals.keys())}")
+
+    # Run each agent x dataset combination
+    started_at = datetime.now()
+    all_results: list[dict[str, str | float | None]] = []
+    # eval_task_info: maps "{agent}__{eval}" -> list of (dir_name, score) for job result.json
+    eval_task_info: dict[str, list[tuple[str, float]]] = {}
+    task_id_counter = 0
+
+    for agent_name, sampler in samplers.items():
+        for eval_name, eval_obj in evals.items():
+            eval_key = f"{agent_name}__{eval_name}"
+
+            # Point sampler trajectory to the job directory
+            if hasattr(sampler, "trajectory_dir"):
+                sampler.trajectory_dir = output_mgr.base_dir
+
+            print(f"\nRunning {eval_name} with {agent_name}")
+            result = eval_obj(sampler)
+
+            # Get per-example scores
+            individual_scores = (result.metadata or {}).get("individual_scores", [])
+
+            # Create per-task directories and write per-task outputs
+            task_entries: list[tuple[str, float]] = []
+            for i, score in enumerate(individual_scores):
+                task_dir, dir_name = output_mgr.create_task_dir(eval_name, task_id_counter + i)
+                output_mgr.write_reward(task_dir, score)
+
+                # Write per-task grading details
+                grading_details = {"score": score}
+                if result.convos and i < len(result.convos):
+                    grading_details["convo"] = result.convos[i]
+                output_mgr.write_grading_details(task_dir, grading_details)
+
+                task_entries.append((dir_name, float(score)))
+
+            task_id_counter += len(individual_scores)
+            eval_task_info[eval_key] = task_entries
+
+            metrics = (result.metrics or {}) | {"score": result.score}
+            metrics = dict(sorted(metrics.items()))
+
+            print(f"  Score: {result.score}")
+            print(f"  Metrics: {metrics}")
+            print(f"  Tasks: {len(individual_scores)}")
+
+            all_results.append({
+                "agent": agent_name,
+                "eval": eval_name,
+                "score": result.score,
+            })
+
+    # Write job-level result.json
+    finished_at = datetime.now()
+    if eval_task_info:
+        result_path = output_mgr.write_job_result(started_at, finished_at, eval_task_info)
+        print(f"\nJob result: {result_path}")
+
+    # Print summary table
+    if all_results:
+        print("\n=== Summary ===")
+        df = pd.DataFrame(all_results)
+        if len(df) > 1:
+            pivot = df.pivot(index="agent", columns="eval", values="score")
+            print(pivot.to_markdown())
+        else:
+            for r in all_results:
+                print(f"  {r['agent']} / {r['eval']}: score={r['score']}")
+
+    return all_results
 
 
 def main():
@@ -66,8 +301,18 @@ def main():
         default="claude-sonnet-4-20250514",
         help="Model to use with claude-code sampler (default: claude-sonnet-4-20250514)",
     )
+    parser.add_argument(
+        "-c", "--config",
+        type=str,
+        help="Path to YAML config file (Harbor-style evaluation)",
+    )
 
     args = parser.parse_args()
+
+    # Dispatch to config-based runner if -c is provided
+    if args.config:
+        config = load_config(args.config)
+        return run_from_config(config, args)
 
     # List of available model names (defined separately to avoid initializing samplers for --list-models)
     MODEL_NAMES = [
@@ -303,79 +548,15 @@ def main():
     # ^^^ used for fuzzy matching, just for math
 
     def get_evals(eval_name, debug_mode):
-        num_examples = (
-            args.examples if args.examples is not None else (5 if debug_mode else None)
+        return _build_eval(
+            eval_name=eval_name,
+            debug_mode=debug_mode,
+            num_examples_override=args.examples,
+            n_repeats=args.n_repeats,
+            n_threads=args.n_threads,
+            grading_sampler=grading_sampler,
+            equality_checker=equality_checker,
         )
-        # Set num_examples = None to reproduce full evals
-        match eval_name:
-            case "mmlu":
-                return MMLUEval(num_examples=1 if debug_mode else num_examples)
-            case "math":
-                return MathEval(
-                    equality_checker=equality_checker,
-                    num_examples=num_examples,
-                    n_repeats=1 if debug_mode else args.n_repeats or 10,
-                )
-            case "gpqa":
-                return GPQAEval(
-                    n_repeats=1 if debug_mode else args.n_repeats or 10,
-                    num_examples=num_examples,
-                )
-            case "mgsm":
-                return MGSMEval(
-                    num_examples_per_lang=10 if debug_mode else num_examples or 250
-                )
-            case "drop":
-                return DropEval(
-                    num_examples=10 if debug_mode else num_examples,
-                    train_samples_per_prompt=3,
-                )
-            case "humaneval":
-                return HumanEval(num_examples=10 if debug_mode else num_examples)
-            case "simpleqa":
-                return SimpleQAEval(
-                    grader_model=grading_sampler,
-                    num_examples=10 if debug_mode else num_examples,
-                    n_threads=args.n_threads,
-                )
-            case "browsecomp":
-                return BrowseCompEval(
-                    grader_model=grading_sampler,
-                    num_examples=10 if debug_mode else num_examples,
-                )
-            case "healthbench":
-                return HealthBenchEval(
-                    grader_model=grading_sampler,
-                    num_examples=10 if debug_mode else num_examples,
-                    n_repeats=args.n_repeats or 1,
-                    n_threads=args.n_threads or 120,
-                    subset_name=None,
-                )
-            case "healthbench_hard":
-                return HealthBenchEval(
-                    grader_model=grading_sampler,
-                    num_examples=10 if debug_mode else num_examples,
-                    n_repeats=args.n_repeats or 1,
-                    n_threads=args.n_threads or 120,
-                    subset_name="hard",
-                )
-            case "healthbench_consensus":
-                return HealthBenchEval(
-                    grader_model=grading_sampler,
-                    num_examples=10 if debug_mode else num_examples,
-                    n_repeats=args.n_repeats or 1,
-                    n_threads=args.n_threads or 120,
-                    subset_name="consensus",
-                )
-            case "healthbench_meta":
-                return HealthBenchMetaEval(
-                    grader_model=grading_sampler,
-                    num_examples=10 if debug_mode else num_examples,
-                    n_repeats=args.n_repeats or 1,
-                    n_threads=args.n_threads or 120,
-                )
-            case _:
-                raise Exception(f"Unrecognized eval type: {eval_name}")
 
     if args.eval:
         evals_list = args.eval.split(",")

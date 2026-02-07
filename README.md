@@ -12,16 +12,16 @@ export OPENAI_API_KEY="your_openai_api_key"
 
 ```bash
 # Run SimpleQA with Claude Code (agent-based, Docker)
-uv run python main.py --model claude-code --claude-code-model claude-opus-4-20250514 --eval simpleqa --examples 5
+uv run python main.py -c simpleqa_parity_claude_opus4_6.yaml --examples 50
 ```
 
 ## Experimental Results
 
 ### SimpleQA Benchmark (n=50)
 
-| Model | Type | Correct | Incorrect | Not Attempted | Accuracy (Given Attempted) | F1 Score |
-|-------|------|---------|-----------|---------------|---------------------------|----------|
-| claude-opus-4-20250514 | Agent (Claude Code) | 84% | 10% | 6% | 89.4% | 0.866 |
+| Model | Type | Accuracy | Notes |
+|-------|------|---------|-----------|
+| claude-opus-4-6 | Agent (Claude Code) | 0.967 ± 0.025 | 50 examples over 3 runs |
 
 **Notes:**
 - `claude-code` runs the specified model via Claude Code CLI inside a Docker container following Harbor's experimental setup
@@ -30,22 +30,6 @@ uv run python main.py --model claude-code --claude-code-model claude-opus-4-2025
 
 ### Evaluation Details
 
-- **Models:** claude-opus-4-20250514 (via Claude Code agent)
-- **Timeout:** 300 seconds per task
+- **Models:** claude-opus-4-6 (via Claude Code agent)
+- **Timeout:** 3000 seconds per task
 - **Grader:** gpt-4o-mini
-
-## Agent Trajectories
-
-When using `claude-code` or `claude-code-local`, agent trajectories are saved to `/tmp/claude-code-trajectories/`:
-
-```
-/tmp/claude-code-trajectories/
-├── task_0001/
-│   ├── claude-code-output.txt    # Raw stream-json output
-│   ├── logs/agent/               # Execution logs
-│   ├── workspace/answer.txt      # Agent's answer
-│   └── sessions/                 # Claude Code session JSONL (full trajectory)
-├── task_0002/
-│   └── ...
-
-```

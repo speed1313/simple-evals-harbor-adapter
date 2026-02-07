@@ -212,7 +212,10 @@ def aggregate_results(
         metrics=final_metrics,
         htmls=htmls,
         convos=convos,
-        metadata={"example_level_metadata": metadata},
+        metadata={
+            "example_level_metadata": metadata,
+            "individual_scores": name2values.get("score", []),
+        },
     )
 
 
